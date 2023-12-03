@@ -1,0 +1,45 @@
+type Bus = record {
+  id : nat64;
+  is_booked : bool;
+  model : text;
+  updated_at : opt nat64;
+  owner : text;
+  make : text;
+  color : text;
+  year : nat32;
+  created_at : nat64;
+};
+type BusPayload = record {
+  is_booked : bool;
+  model : text;
+  owner : text;
+  make : text;
+  color : text;
+  year : nat32;
+};
+type Customer = record { id : nat64; contact : text; name : text };
+type Error = variant { NotFound : record { msg : text } };
+type Reservation = record {
+  reservation_time : nat64;
+  customer_id : nat64;
+  bus_id : nat64;
+};
+type Result = variant { Ok; Err : Error };
+type Result_1 = variant { Ok : Bus; Err : Error };
+type Result_2 = variant { Ok : Customer; Err : Error };
+type Result_3 = variant { Ok : Reservation; Err : Error };
+type Result_4 = variant { Ok : bool; Err : Error };
+service : {
+  add_bus : (BusPayload) -> (opt Bus);
+  add_customer : (text, text) -> (opt Customer);
+  cancel_reservation : (nat64) -> (Result);
+  delete_bus : (nat64) -> (Result_1);
+  delete_customer : (nat64) -> (Result_2);
+  generate_report : () -> (vec Bus) query;
+  get_bus : (nat64) -> (Result_1) query;
+  get_customer : (nat64) -> (Result_2) query;
+  get_reservation : (nat64) -> (Result_3) query;
+  is_booked : (nat64) -> (Result_4) query;
+  make_reservation : (nat64, nat64) -> (Result_3);
+  update_bus : (nat64, BusPayload) -> (Result_1);
+}
