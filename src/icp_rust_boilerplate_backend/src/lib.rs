@@ -52,6 +52,10 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1)))
         ));
+    static BUS_MAINTENANCE_STORAGE: RefCell<StableBTreeMap<u64, BusMaintenanceRecord, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(4))) // Assuming MemoryId::new(4) for bus maintenance storage
+        ));
 }
 
 #[derive(candid::CandidType, Serialize, Deserialize, Default)]
@@ -107,7 +111,28 @@ impl BoundedStorable for Reservation {
     const MAX_SIZE: u32 = 1024;
     const IS_FIXED_SIZE: bool = false;
 }
+#[derive(candid::CandidType, Serialize, Deserialize, Default, Clone)]
+struct BusMaintenanceRecord {
+    id: u64,
+    bus_id: u64,
+    maintenance_date: u64,
+    details: String,
+}
 
+impl Storable for BusMaintenanceRecord {
+    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+}
+
+impl BoundedStorable for BusMaintenanceRecord {
+    const MAX_SIZE: u32 = 1024;
+    const IS_FIXED_SIZE: bool = false;
+}
 #[ic_cdk::query]
 fn get_bus(id: u64) -> Result<Bus, Error> {
     match _get_bus(&id) {
@@ -250,6 +275,34 @@ fn delete_customer(id: u64) -> Result<Customer, Error> {
         }),
     }
 }
+#[ic_cdk::query]
+fn search_buses(make: Option<String>, model: Option<String>, year: Option<u32>, color: Option<String>, is_booked: Option<bool>) -> Vec<Bus> {
+    BUS_STORAGE
+        .with(|service| {
+            service.borrow()
+                .iter()
+                .filter(|(_, bus)| {
+                    make.as_ref().map_or(true, |m| &bus.make == m) &&
+                    model.as_ref().map_or(true, |m| &bus.model == m) &&
+                    year.map_or(true, |y| bus.year == y) &&
+                    color.as_ref().map_or(true, |c| &bus.color == c) &&
+                    is_booked.map_or(true, |b| bus.is_booked == b)
+                })
+                .map(|(_, bus)| bus.clone())
+                .collect()
+        })
+}
+#[ic_cdk::query]
+fn get_customer_reservations(customer_id: u64) -> Vec<Reservation> {
+    // Assuming MemoryId::new(3) is used for reservation storage
+    let reservation_storage = MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)));
+    StableBTreeMap::<u64, Reservation, Memory>::init(reservation_storage)
+        .borrow()
+        .iter()
+        .filter(|(_, reservation)| reservation.customer_id == customer_id)
+        .map(|(_, reservation)| reservation.clone())
+        .collect()
+}
 
 #[ic_cdk::update]
 fn make_reservation(bus_id: u64, customer_id: u64) -> Result<Reservation, Error> {
@@ -268,7 +321,38 @@ fn make_reservation(bus_id: u64, customer_id: u64) -> Result<Reservation, Error>
         }),
     }
 }
+#[ic_cdk::update]
+fn add_bus_maintenance_record(record: BusMaintenanceRecord) -> Result<BusMaintenanceRecord, Error> {
+    let id = ID_COUNTER
+        .with(|counter| {
+            let current_value = *counter.borrow().get();
+            counter.borrow_mut().set(current_value + 1)
+        })
+        .expect("cannot increment id counter");
+    let record = BusMaintenanceRecord { id, ..record };
+    BUS_MAINTENANCE_STORAGE.with(|service| service.borrow_mut().insert(record.id, record.clone()));
+    Ok(record)
+}
 
+#[ic_cdk::query]
+fn get_bus_maintenance_records(bus_id: u64) -> Vec<BusMaintenanceRecord> {
+    BUS_MAINTENANCE_STORAGE.with(|service| {
+        service.borrow()
+            .iter()
+            .filter(|(_, record)| record.bus_id == bus_id)
+            .map(|(_, record)| record.clone())
+            .collect()
+    })
+}
+
+#[ic_cdk::update]
+fn delete_bus_maintenance_record(record_id: u64) -> Result<(), Error> {
+    let removed = BUS_MAINTENANCE_STORAGE.with(|service| service.borrow_mut().remove(&record_id));
+    match removed {
+        Some(_) => Ok(()),
+        None => Err(Error::NotFound { msg: format!("Maintenance record with id={} not found.", record_id) }),
+    }
+}
 fn do_insert_reservation(reservation: &Reservation) {
     // Assuming MemoryId::new(3) is reserved for reservation storage
     let reservation_storage = MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)));
@@ -322,6 +406,32 @@ fn generate_report() -> Vec<Bus> {
         .iter()
         .map(|(_, bus)| bus.clone())
         .collect()
+}
+#[derive(candid::CandidType, Serialize, Deserialize, Default, Clone)]
+struct ReservationTimeRange {
+    start_time: u64,
+    end_time: u64,
+}
+
+#[ic_cdk::query]
+fn check_bus_availability(bus_id: u64, time_range: ReservationTimeRange) -> Result<bool, Error> {
+    let reservations = get_reservations_for_bus(bus_id)?;
+    Ok(!reservations.iter().any(|reservation| {
+        let reservation_time = reservation.reservation_time;
+        reservation_time >= time_range.start_time && reservation_time <= time_range.end_time
+    }))
+}
+
+fn get_reservations_for_bus(bus_id: u64) -> Result<Vec<Reservation>, Error> {
+    // Assuming MemoryId::new(3) is used for reservation storage
+    let reservation_storage = MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)));
+    let reservations = StableBTreeMap::<u64, Reservation, Memory>::init(reservation_storage)
+        .borrow()
+        .iter()
+        .filter(|(_, reservation)| reservation.bus_id == bus_id)
+        .map(|(_, reservation)| reservation.clone())
+        .collect();
+    Ok(reservations)
 }
 
 #[derive(candid::CandidType, Deserialize, Serialize)]
