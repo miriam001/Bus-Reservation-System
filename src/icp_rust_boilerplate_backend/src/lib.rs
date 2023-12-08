@@ -54,58 +54,37 @@ thread_local! {
         ));
 }
 
-#[derive(candid::CandidType, Serialize, Deserialize, Default)]
-struct BusPayload {
-    make: String,
-    model: String,
-    year: u32,
-    color: String,
-    owner: String,
-    is_booked: bool, // Add is_booked field to payload
+// Additional imports for Result and Error
+use ic_cdk::export::candid::{CandidType, Deserialize, Func, Principal};
+use ic_cdk::{api, export::candid, export::Principal};
+use serde::export::Formatter;
+
+// Error type
+#[derive(candid::CandidType, Deserialize, Serialize)]
+enum Error {
+    NotFound { msg: String },
+    InvalidInput { msg: String },
 }
 
-#[derive(candid::CandidType, Serialize, Deserialize, Default, Clone)]
-struct Customer {
-    id: u64,
-    name: String,
-    contact: String,
-}
-
-impl Storable for Customer {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::NotFound { msg } | Error::InvalidInput { msg } => write!(f, "{}", msg),
+        }
     }
 }
 
-impl BoundedStorable for Customer {
-    const MAX_SIZE: u32 = 1024;
-    const IS_FIXED_SIZE: bool = false;
-}
-
-#[derive(candid::CandidType, Serialize, Deserialize, Default, Clone)]
-struct Reservation {
-    bus_id: u64,
-    customer_id: u64,
-    reservation_time: u64,
-}
-
-impl Storable for Reservation {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
-impl BoundedStorable for Reservation {
-    const MAX_SIZE: u32 = 1024;
-    const IS_FIXED_SIZE: bool = false;
+// Helper function for error conversion
+fn error<T>(msg: &str) -> Result<T, Error> {
+    Err(Error::InvalidInput {
+        msg: msg.to_string(),
+    })
 }
 
 #[ic_cdk::query]
@@ -119,7 +98,12 @@ fn get_bus(id: u64) -> Result<Bus, Error> {
 }
 
 #[ic_cdk::update]
-fn add_bus(bus: BusPayload) -> Option<Bus> {
+fn add_bus(bus: Bus) -> Result<Bus, Error> {
+    // Validation checks
+    if bus.year < 1900 || bus.year > time().into() {
+        return error("Invalid year for the bus");
+    }
+
     let id = ID_COUNTER
         .with(|counter| {
             let current_value = *counter.borrow().get();
@@ -128,22 +112,22 @@ fn add_bus(bus: BusPayload) -> Option<Bus> {
         .expect("cannot increment id counter");
     let bus = Bus {
         id,
-        make: bus.make,
-        model: bus.model,
-        year: bus.year,
-        color: bus.color,
         created_at: time(),
         updated_at: None,
-        owner: bus.owner,
-        is_booked: bus.is_booked, // Set is_booked from payload
+        ..bus
     };
     do_insert_bus(&bus);
-    Some(bus)
+    Ok(bus)
 }
 
 #[ic_cdk::update]
-fn update_bus(id: u64, payload: BusPayload) -> Result<Bus, Error> {
-    match BUS_STORAGE.with(|service| service.borrow().get(&id)) {
+fn update_bus(id: u64, payload: Bus) -> Result<Bus, Error> {
+    // Validation checks
+    if payload.year < 1900 || payload.year > time().into() {
+        return error("Invalid year for the bus");
+    }
+
+    match BUS_STORAGE.with(|service| service.borrow_mut().get_mut(&id)) {
         Some(mut bus) => {
             bus.make = payload.make;
             bus.model = payload.model;
@@ -151,15 +135,12 @@ fn update_bus(id: u64, payload: BusPayload) -> Result<Bus, Error> {
             bus.color = payload.color;
             bus.updated_at = Some(time());
             bus.owner = payload.owner;
-            bus.is_booked = payload.is_booked; // Update is_booked field
+            bus.is_booked = payload.is_booked;
             do_insert_bus(&bus);
-            Ok(bus)
+            Ok(bus.clone())
         }
         None => Err(Error::NotFound {
-            msg: format!(
-                "couldn't update a bus with id={}. bus not found",
-                id
-            ),
+            msg: format!("couldn't update a bus with id={}. bus not found", id),
         }),
     }
 }
@@ -183,10 +164,7 @@ fn delete_bus(id: u64) -> Result<Bus, Error> {
     match BUS_STORAGE.with(|service| service.borrow_mut().remove(&id)) {
         Some(bus) => Ok(bus),
         None => Err(Error::NotFound {
-            msg: format!(
-                "couldn't delete a bus with id={}. bus not found.",
-                id
-            ),
+            msg: format!("couldn't delete a bus with id={}. bus not found.", id),
         }),
     }
 }
