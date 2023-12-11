@@ -2,6 +2,7 @@
 extern crate serde;
 use candid::{Decode, Encode};
 use ic_cdk::api::time;
+use ic_cdk::caller;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
 use std::{borrow::Cow, cell::RefCell};
@@ -13,13 +14,13 @@ type IdCell = Cell<u64, Memory>;
 #[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
 struct Bus {
     id: u64,
+    owner_principal: String,
     make: String,
     model: String,
     year: u32,
     color: String,
     created_at: u64,
     updated_at: Option<u64>,
-    owner: String,
     is_booked: bool, // New field for booking status
 }
 
@@ -60,13 +61,13 @@ struct BusPayload {
     model: String,
     year: u32,
     color: String,
-    owner: String,
     is_booked: bool, // Add is_booked field to payload
 }
 
 #[derive(candid::CandidType, Serialize, Deserialize, Default, Clone)]
 struct Customer {
     id: u64,
+    customer_principal: String,
     name: String,
     contact: String,
 }
@@ -108,6 +109,25 @@ impl BoundedStorable for Reservation {
     const IS_FIXED_SIZE: bool = false;
 }
 
+fn is_bus_principal(bus: &Bus) -> Result<(), Error> {
+    if bus.owner_principal != caller().to_string(){
+        return  Err(Error::FailedAuthentication);
+    }else {
+        Ok(())
+    }
+}
+
+fn is_customer_principal(customer: &Customer) -> Result<(), Error> {
+    if customer.customer_principal != caller().to_string(){
+        return  Err(Error::FailedAuthentication);
+    }else {
+        Ok(())
+    }
+}
+
+fn is_invalid_string(str: &String) -> bool {
+    return str.trim().is_empty()
+}
 #[ic_cdk::query]
 fn get_bus(id: u64) -> Result<Bus, Error> {
     match _get_bus(&id) {
@@ -119,7 +139,14 @@ fn get_bus(id: u64) -> Result<Bus, Error> {
 }
 
 #[ic_cdk::update]
-fn add_bus(bus: BusPayload) -> Option<Bus> {
+fn add_bus(bus: BusPayload) -> Result<Bus, Error> {
+    if is_invalid_string(&bus.color) || is_invalid_string(&bus.make) || is_invalid_string(&bus.model)
+    {
+        return Err(Error::InvalidInputData { msg: format!("Payload cannot contain empty strings.") })
+    }
+    if bus.year < 1995 || bus.year > 2024{
+        return Err(Error::InvalidInputData { msg: format!("Age of bus needs to be between 1995 and 2024") })
+    }
     let id = ID_COUNTER
         .with(|counter| {
             let current_value = *counter.borrow().get();
@@ -128,29 +155,36 @@ fn add_bus(bus: BusPayload) -> Option<Bus> {
         .expect("cannot increment id counter");
     let bus = Bus {
         id,
+        owner_principal: caller().to_string(),
         make: bus.make,
         model: bus.model,
         year: bus.year,
         color: bus.color,
         created_at: time(),
         updated_at: None,
-        owner: bus.owner,
         is_booked: bus.is_booked, // Set is_booked from payload
     };
     do_insert_bus(&bus);
-    Some(bus)
+    Ok(bus)
 }
 
 #[ic_cdk::update]
 fn update_bus(id: u64, payload: BusPayload) -> Result<Bus, Error> {
+    if is_invalid_string(&payload.color) || is_invalid_string(&payload.make) || is_invalid_string(&payload.model)
+    {
+        return Err(Error::InvalidInputData { msg: format!("Payload cannot contain empty strings.") })
+    }
+    if payload.year < 1995 || payload.year > 2024{
+        return Err(Error::InvalidInputData { msg: format!("Age of bus needs to be between 1995 and 2024") })
+    }
     match BUS_STORAGE.with(|service| service.borrow().get(&id)) {
         Some(mut bus) => {
+            is_bus_principal(&bus)?;
             bus.make = payload.make;
             bus.model = payload.model;
             bus.year = payload.year;
             bus.color = payload.color;
             bus.updated_at = Some(time());
-            bus.owner = payload.owner;
             bus.is_booked = payload.is_booked; // Update is_booked field
             do_insert_bus(&bus);
             Ok(bus)
@@ -180,6 +214,8 @@ fn do_insert_bus(bus: &Bus) {
 
 #[ic_cdk::update]
 fn delete_bus(id: u64) -> Result<Bus, Error> {
+    let bus = _get_bus(&id).ok_or_else(|| Error::NotFound { msg: format!("Bus with id={} not found.", id) })?;
+    is_bus_principal(&bus)?;
     match BUS_STORAGE.with(|service| service.borrow_mut().remove(&id)) {
         Some(bus) => Ok(bus),
         None => Err(Error::NotFound {
@@ -192,7 +228,10 @@ fn delete_bus(id: u64) -> Result<Bus, Error> {
 }
 
 #[ic_cdk::update]
-fn add_customer(name: String, contact: String) -> Option<Customer> {
+fn add_customer(name: String, contact: String) -> Result<Customer, Error> {
+    if is_invalid_string(&name) || is_invalid_string(&contact){
+        return Err(Error::InvalidInputData { msg: format!("Payload cannot contain empty strings.") })
+    }
     let id = ID_COUNTER
         .with(|counter| {
             let current_value = *counter.borrow().get();
@@ -201,11 +240,12 @@ fn add_customer(name: String, contact: String) -> Option<Customer> {
         .expect("cannot increment id counter");
     let customer = Customer {
         id,
+        customer_principal: caller().to_string(),
         name,
         contact,
     };
     do_insert_customer(&customer);
-    Some(customer)
+    Ok(customer)
 }
 
 fn do_insert_customer(customer: &Customer) {
@@ -238,6 +278,7 @@ fn _get_customer(id: &u64) -> Option<Customer> {
 fn delete_customer(id: u64) -> Result<Customer, Error> {
     match _get_customer(&id) {
         Some(customer) => {
+            is_customer_principal(&customer)?;
             // Assuming MemoryId::new(2) is reserved for customer storage
             let customer_storage = MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2)));
             StableBTreeMap::<u64, Customer, Memory>::init(customer_storage)
@@ -254,7 +295,11 @@ fn delete_customer(id: u64) -> Result<Customer, Error> {
 #[ic_cdk::update]
 fn make_reservation(bus_id: u64, customer_id: u64) -> Result<Reservation, Error> {
     match (_get_bus(&bus_id), _get_customer(&customer_id)) {
-        (Some(_), Some(_)) => {
+        (Some(bus), Some(customer)) => {
+            is_customer_principal(&customer)?;
+            if bus.is_booked{
+                return Err(Error::AlreadyBooked { msg: format!("Bus with id={} is already booked.", bus_id) })
+            }
             let reservation = Reservation {
                 bus_id,
                 customer_id,
@@ -299,13 +344,25 @@ fn _get_reservation(bus_id: &u64) -> Option<Reservation> {
 #[ic_cdk::update]
 fn cancel_reservation(bus_id: u64) -> Result<(), Error> {
     match _get_reservation(&bus_id) {
-        Some(_) => {
-            // Assuming MemoryId::new(3) is reserved for reservation storage
-            let reservation_storage = MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)));
-            StableBTreeMap::<u64, Reservation, Memory>::init(reservation_storage)
-                .borrow_mut()
-                .remove(&bus_id);
-            Ok(())
+        Some(reservation) => {
+            let customer = _get_customer(&reservation.customer_id);
+            let bus =_get_bus(&reservation.bus_id);
+            if customer.is_none() && bus.is_none(){
+                return Err(Error::NotFound { msg: format!("Bus and Customer for this reservation not found.") })
+            }
+            let caller_to_string = caller().to_string();
+            if customer.is_some_and(|customer| customer.customer_principal == caller_to_string)
+             || bus.is_some_and(|bus| bus.owner_principal == caller_to_string) {
+                // Assuming MemoryId::new(3) is reserved for reservation storage
+                let reservation_storage = MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3)));
+                StableBTreeMap::<u64, Reservation, Memory>::init(reservation_storage)
+                    .borrow_mut()
+                    .remove(&bus_id);
+                Ok(())
+            }else{
+                return Err(Error::FailedAuthentication)
+            }
+
         }
         None => Err(Error::NotFound {
             msg: format!("a reservation for bus_id={} not found", bus_id),
@@ -327,6 +384,9 @@ fn generate_report() -> Vec<Bus> {
 #[derive(candid::CandidType, Deserialize, Serialize)]
 enum Error {
     NotFound { msg: String },
+    InvalidInputData{ msg: String},
+    AlreadyBooked{msg: String},
+    FailedAuthentication
 }
 
 fn _get_bus(id: &u64) -> Option<Bus> {
